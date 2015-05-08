@@ -1,0 +1,4 @@
+<launch> 
+ <node name="ardrone_driver" package="ardrone_autonomy" type="ardrone_driver" output="screen"/>
+
+</launch>
