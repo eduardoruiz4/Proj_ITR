@@ -1,5 +1,5 @@
 #include "ros/ros.h"
-#include "ar_pose/ARMarker.h"
+#include "ar_pose/ARMarkers.h"
 #include "std_msgs/Empty.h"
 #include "std_srvs/Empty.h"
 #include "geometry_msgs/Twist.h"
@@ -8,10 +8,10 @@
 #include <tf/transform_listener.h>
 #include <time.h>
 
-bool bTakeOff=false,bLand=false;
-float eyaw,ex,ey,ez,x,y,z,xd,yd,zd;
-double roll,pitch,yaw;
-int i=0;
+bool bTakeOff=false,bLand=false,wait=true;
+float eyaw=1,ex=1,ey=1,ez=1,x,x_mod,y,z,xd,yd,zd;
+double roll,pitch,yaw,secs,currentsecs,beginsecs;
+int i=0,timeflag=0;
 
 ////////////////////////////////////////////////////////////
 
@@ -26,18 +26,27 @@ config.landing=false;
 
 ////////////////////////////////////////////////////////////////
 
-void chatterCallback(const ar_pose::ARMarker ar_pose_marker)
+void chatterCallback(const ar_pose::ARMarkers::ConstPtr& ar_pose_marker)
 {
 
-tf::Quaternion qt;
-tf::quaternionMsgToTF(ar_pose_marker.pose.pose.orientation, qt);
-tf::Matrix3x3(qt).getRPY(roll,pitch,yaw);
- 
-x=ar_pose_marker.pose.pose.position.x;
-y=ar_pose_marker.pose.pose.position.y;
-z=ar_pose_marker.pose.pose.position.z;
-printf("x:%f y:%f z:%f r:%f p:%f yw:%f\n", x,y,z,roll,pitch ,yaw);
+if(!ar_pose_marker->markers.empty()){
+	tf::Quaternion qt;
+	tf::quaternionMsgToTF(ar_pose_marker->markers.at(0).pose.pose.orientation, qt);
+	tf::Matrix3x3(qt).getRPY(roll,pitch,yaw);
+	   
+	x=ar_pose_marker->markers.at(0).pose.pose.position.x;
+	y=ar_pose_marker->markers.at(0).pose.pose.position.y;
+	z=ar_pose_marker->markers.at(0).pose.pose.position.z;
+	x_mod=x;
 
+	printf("x:%f y:%f z:%f yaw:%f\n", x,y,z,yaw);
+}
+else{
+	ex=0;
+	ey=0;
+	ez=0;
+	eyaw=0;
+}
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -63,10 +72,13 @@ server.setCallback(f);
 std_msgs::Empty launch;
 std_msgs::Empty landing;
 std_srvs::Empty togglecam;
+geometry_msgs::Twist veloc;
 
 bool camSelected = 0;
 bool flying = false;
-                   
+
+
+             
 while (ros::ok())
 {
 	
@@ -99,18 +111,57 @@ while (ros::ok())
 
 	if (flying)
 	{
-		geometry_msgs::Twist veloc;
-		//usleep(2000000);
-		ez=0.7-z;
-		veloc.linear.z=ez;
-		eyaw=0-yaw;
-		veloc.angular.z=eyaw;
-		ex=0-x;
-		ey=0-y;
-		veloc.linear.x=ey;
-		veloc.linear.y=ex;
+			 
+			if(camSelected==1)
+			{
+				//usleep(2000000);
+				ez=0.7-z;
+				veloc.linear.z=ez;
+				eyaw=(3.1416)-yaw;
+				veloc.angular.z=eyaw;
+				ex=0-x;
+				ey=0-y;
+				veloc.linear.x=ey;
+				veloc.linear.y=ex;
+			}
+			else{
+				//usleep(2000000);
+				ez=1-z;
+				ex=0-x;
+				ey=0-y;
+				eyaw=0;
+				veloc.linear.z=ey;
+				veloc.linear.x=-ez;
+				veloc.linear.y=ex;
+			}
 
-		vel.publish(veloc);
+			vel.publish(veloc);
+			
+		
+			if(fabs(ez)<.03&&fabs(ex)<.03&&fabs(ey)<.03&&fabs(eyaw)<.03){
+			
+				ROS_INFO("Control Done");
+				if(timeflag==0){
+					ros::Time begin = ros::Time::now();
+					beginsecs=begin.toSec();
+					timeflag=1;
+				}
+				ros::Time current = ros::Time::now();
+				currentsecs=current.toSec();
+				secs=currentsecs-beginsecs;
+				ROS_INFO("%f",secs);
+				if(secs>5){
+					ROS_INFO("5 seconds");
+					if (camSelected==1){
+						clientToggleCam.call(togglecam);  
+						camSelected = 0; 
+						
+					}
+				}
+			
+			}
+			
+	
 	}   
 	ros::spinOnce();
 	loop_rate.sleep();
