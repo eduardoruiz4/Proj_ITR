@@ -11,7 +11,8 @@
 bool bTakeOff=false,bLand=false,wait=true;
 float eyaw=1,ex=1,ey=1,ez=1,x,x_mod,y,z,xd,yd,zd;
 double roll,pitch,yaw,secs,currentsecs,beginsecs;
-int i=0,timeflag=0;
+int i=0,timeflag=0,detected_flag=1,flagmarker2=0,flag=0;
+
 
 ////////////////////////////////////////////////////////////
 
@@ -40,12 +41,11 @@ if(!ar_pose_marker->markers.empty()){
 	x_mod=x;
 
 	printf("x:%f y:%f z:%f yaw:%f\n", x,y,z,yaw);
+	detected_flag=0;
 }
 else{
-	ex=0;
-	ey=0;
-	ez=0;
-	eyaw=0;
+	detected_flag=1;
+	ROS_INFO("Marker Not Detected"); 
 }
 }
 
@@ -84,6 +84,7 @@ while (ros::ok())
 	
 	if(bLand==true)
 	{
+	
 		ROS_INFO("Reconfigure Request Land"); 
 		land_pub.publish(landing);
 		usleep(500000);
@@ -112,12 +113,12 @@ while (ros::ok())
 	if (flying)
 	{
 			 
-			if(camSelected==1)
+			if(camSelected==1) //Si la camara esta viendo abajo
 			{
 				//usleep(2000000);
-				ez=0.7-z;
+				ez=1-z;
 				veloc.linear.z=ez;
-				eyaw=(3.1416)-yaw;
+				eyaw=(3.1416/2)-yaw;
 				veloc.angular.z=eyaw;
 				ex=0-x;
 				ey=0-y;
@@ -125,45 +126,102 @@ while (ros::ok())
 				veloc.linear.y=ex;
 			}
 			else{
-				//usleep(2000000);
-				ez=1-z;
-				ex=0-x;
-				ey=0-y;
-				eyaw=0;
-				veloc.linear.z=ey;
-				veloc.linear.x=-ez;
-				veloc.linear.y=ex;
+				
+				if(detected_flag==1){ //Detected flag se activa en el suscriber del ar pose cuando no se detecta marker, es decir aquí entra cuando no detecta el marker frontal y tiene que girar
+					ex=10;//Igualo a 10 para que no entre en el control done de más adelante
+					ey=10;
+					ez=10;
+					eyaw=10;
+					veloc.linear.z=0;
+					veloc.linear.x=0;
+					veloc.linear.y=0;
+					veloc.angular.z=.1;// Gira
+					
+				}
+				else{ //Detecta marker
+				
+					ez=1-z;
+					if(ez<-0.2) //Regula la velocidad en el avance hacia marker, ya que al estar a 2 metros de la referencia cabecea si se ocupa la velocidad con el valor del error, provocando que pierda el marker
+						ez=-.2;
+				
+					ex=0-x;
+					ey=0-y;
+					eyaw=0;
+				
+					if(fabs(ex)>0.05&&flagmarker2==0) //Aún cuando detecte el marker, tiene que alinearse frontalmente
+					{
+						ROS_INFO("ex-%f",ex);
+						veloc.angular.z=.1;//Sigue girando
+						veloc.linear.z=0;
+						veloc.linear.x=0;
+						veloc.linear.y=0;
+						
+					}
+					if(fabs(ex)<0.05){//Se alinea al marker y avanza
+						
+						flagmarker2=1;
+						ROS_INFO("ex-%f",ex);
+						veloc.linear.z=0;
+						veloc.linear.x=-ez;
+						veloc.linear.y=ex;
+						veloc.angular.z=0;
+						if(fabs(ez)<0.05){
+							
+							veloc.linear.z=ey;
+							veloc.linear.x=-ez;
+							veloc.linear.y=ex;
+						}
+					}
+				
+				}
 			}
 
 			vel.publish(veloc);
 			
 		
-			if(fabs(ez)<.03&&fabs(ex)<.03&&fabs(ey)<.03&&fabs(eyaw)<.03){
+			if(fabs(ez)<.05&&fabs(ex)<.05&&fabs(ey)<.05&&fabs(eyaw)<.05){//Entra en caso que los errores sean minimos
 			
 				ROS_INFO("Control Done");
-				if(timeflag==0){
-					ros::Time begin = ros::Time::now();
+				if(timeflag==0){//Primera vez que entra
+					ros::Time begin = ros::Time::now();//inicializa el crono
 					beginsecs=begin.toSec();
 					timeflag=1;
 				}
 				ros::Time current = ros::Time::now();
 				currentsecs=current.toSec();
-				secs=currentsecs-beginsecs;
+				secs=currentsecs-beginsecs;//Diferencia de tiempo
 				ROS_INFO("%f",secs);
 				if(secs>5){
-					ROS_INFO("5 seconds");
+					ROS_INFO("5 seconds");//Transcurren 5 segundos
 					if (camSelected==1){
 						clientToggleCam.call(togglecam);  
 						camSelected = 0; 
+						timeflag=0;
+						eyaw=10;
+						ex=10;
+						//usleep(500000);
+					}
+					else{
+						ROS_INFO("Reconfigure Request Land"); 
+						land_pub.publish(landing);
+						usleep(500000);
+						ROS_INFO("Reconfigure Request LandOk");
+						bLand=false;
+						clientToggleCam.call(togglecam);  
+						camSelected = 1; 
 						
+				  
+						flying = false;
 					}
 				}
 			
 			}
 			
 	
-	}   
+	} 
+	  
 	ros::spinOnce();
+	//usleep(500000);
 	loop_rate.sleep();
    
 }  
