@@ -6,22 +6,37 @@
 #include <dynamic_reconfigure/server.h>
 #include <proj_itr/dynparamConfig.h>
 #include <tf/transform_listener.h>
+#include "ardrone_autonomy/Navdata.h"
 #include <time.h>
 
 bool bTakeOff=false,bLand=false,wait=true;
-float eyaw=1,ex=1,ey=1,ez=1,x,x_mod,y,z,xd,yd,zd;
-double roll,pitch,yaw,secs,currentsecs,beginsecs;
-int i=0,timeflag=0,detected_flag=1,flagmarker2=0,flag=0;
+float eyaw=1,ex=1,ey=1,ez=1,xd,yd,zd;
+//std::vector<double> X(6,0); //State vector - Init 0
+std::vector<std::vector<double> > X_marker(1,std::vector<double> (6,0));
 
+double secs,currentsecs,beginsecs;
+int i=0,timeflag=0;
+//labels
+int stateLanding=8, stateTakingOff=6, stateLand=2, stateFlying=3; // CHANGE in 3->4 IN THE REAL ROBOT
+int x=0, y=1, z=2, roll=3, pitch=4, yaw=5;
+bool frontCamera=0, botCamera=1, currentCamera=0;
 
+int currentState=stateLand;
+int currentStage=0;
+// Debug
+bool detectedMarker=false;
+bool bTransitionStage2 = false;
 ////////////////////////////////////////////////////////////
 
-void callback(proj_itr::dynparamConfig &config, uint32_t level) {
+void callback(proj_itr::dynparamConfig &config, uint32_t level) 
+{
 
-bTakeOff=config.takeOff;
-config.takeOff=false;
-bLand=config.landing;
-config.landing=false;
+	ROS_INFO("Reconfigure callback");
+		
+	bTakeOff=config.takeOff;
+	config.takeOff=false;
+	bLand=config.landing;
+	config.landing=false;
 
 }
 
@@ -30,201 +45,257 @@ config.landing=false;
 void chatterCallback(const ar_pose::ARMarkers::ConstPtr& ar_pose_marker)
 {
 
-if(!ar_pose_marker->markers.empty()){
+if(!ar_pose_marker->markers.empty())
+	{ //Update position
+	ROS_INFO("%d%d",currentStage,(currentStage!=3&&currentStage!=2));
+	if (currentStage!=3&&currentStage!=2){
 	tf::Quaternion qt;
 	tf::quaternionMsgToTF(ar_pose_marker->markers.at(0).pose.pose.orientation, qt);
-	tf::Matrix3x3(qt).getRPY(roll,pitch,yaw);
-	   
-	x=ar_pose_marker->markers.at(0).pose.pose.position.x;
-	y=ar_pose_marker->markers.at(0).pose.pose.position.y;
-	z=ar_pose_marker->markers.at(0).pose.pose.position.z;
-	x_mod=x;
-
-	printf("x:%f y:%f z:%f yaw:%f\n", x,y,z,yaw);
-	detected_flag=0;
-}
-else{
-	detected_flag=1;
-	ROS_INFO("Marker Not Detected"); 
-}
+	tf::Matrix3x3(qt).getRPY(X_marker[0][roll],X_marker[0][pitch],X_marker[0][yaw]);
+	   }
+	X_marker[0][x]=ar_pose_marker->markers.at(0).pose.pose.position.x;
+	X_marker[0][y]=-ar_pose_marker->markers.at(0).pose.pose.position.y;
+	X_marker[0][z]=ar_pose_marker->markers.at(0).pose.pose.position.z;
+	printf("x:%f y:%f z:%f yaw:%f\n", X_marker[0][x],X_marker[0][y],X_marker[0][z],X_marker[0][yaw]);
+	detectedMarker=true;
+	ROS_INFO("Detected marker");
+	ROS_INFO("Marker size %d",ar_pose_marker->markers.size());
+	ROS_INFO("Marker id %d",ar_pose_marker->markers.at(0).id);
+	}
+else
+	{
+	if (currentStage==2 && bTransitionStage2==false)
+	{	
+		bTransitionStage2=true;
+	}
+	
+	detectedMarker=false;
+	ROS_INFO("NOT Detected marker");
+	}
 }
 
 //////////////////////////////////////////////////////////////////////
 
+void currentStateCallback(const ardrone_autonomy::Navdata navdata)
+{
+currentState=navdata.state;
+//printf("currentState:%d \n", currentState);
+}
+
+//////////////////////////////////////////////////////////////////////
+//HEADERS
+void stateManagement(ros::Publisher landPublisher,ros::Publisher takeOffPublisher);
+void setCamera(bool refCamera, bool &currentCamera,ros::ServiceClient clientToggleCam);
+std::vector<double> controlLaw(std::vector<double> X_ref,std::vector<double> X, ros::Publisher VelocityPublisher);
+//////////////////////////////////////////////////////////////////////
 int main(int argc, char **argv)
 {
-//usleep(5000000);
-
+// Node settings
 ros::init(argc, argv, "proj_itr_node");
 ros::NodeHandle n;
+ros::Rate loop_rate(20);
+
+// Publisher - Subscribers
 ros::Publisher vel = n.advertise<geometry_msgs::Twist>("cmd_vel", 1);
 ros::Publisher takeOff_pub = n.advertise<std_msgs::Empty>("ardrone/takeoff", 100,true);
 ros::Publisher land_pub = n.advertise<std_msgs::Empty>("ardrone/land", 100,true);
-ros::ServiceClient clientToggleCam = n.serviceClient<std_srvs::Empty>("ardrone/togglecam");
-ros::Subscriber pose_sub_ = n.subscribe("ar_pose_marker", 1, chatterCallback); 
-ros::Rate loop_rate(20);
+ros::Subscriber pose_sub_ = n.subscribe("ar_pose_marker", 1, chatterCallback);
+ros::Subscriber state_sub = n.subscribe("ardrone/navdata", 1, currentStateCallback); 
 
+// Services 
+ros::ServiceClient clientToggleCam = n.serviceClient<std_srvs::Empty>("ardrone/togglecam");
+
+// Dynamics reconfigure
 dynamic_reconfigure::Server<proj_itr::dynparamConfig> server;
 dynamic_reconfigure::Server<proj_itr::dynparamConfig>::CallbackType f;
 f = boost::bind(&callback, _1, _2);
 server.setCallback(f);
 
-std_msgs::Empty launch;
-std_msgs::Empty landing;
-std_srvs::Empty togglecam;
+// Variables
+std_msgs::Empty empty_msg;
+std_srvs::Empty empty_srv;
 geometry_msgs::Twist veloc;
 
-bool camSelected = 0;
-bool flying = false;
 
+bool camSelected = 0; 
 
-             
+std::vector<double> X_ref(6,0);
+std::vector<double> X(6,0);    
+std::vector<double> error(6,0);       
+std::vector<double> u(6,0); 
+sleep(3);   
+
+//Aux
+
 while (ros::ok())
 {
-	
-	if(bLand==true)
-	{
-	
-		ROS_INFO("Reconfigure Request Land"); 
-		land_pub.publish(landing);
-		usleep(500000);
-		ROS_INFO("Reconfigure Request LandOk");
-		bLand=false;
-		if (camSelected==1){
-			clientToggleCam.call(togglecam);  
-			camSelected = 0; 
-		}
-  
-		flying = false;
-	}
-	else if(bTakeOff==true)
-	{
-		ROS_INFO("Reconfigure Request TakeOff");
-		takeOff_pub.publish(launch); 
-		if (camSelected==0)
-			{clientToggleCam.call(togglecam);  camSelected = 1; }
-		ROS_INFO("Delay Start");
-		usleep(500000);
-		ROS_INFO("Reconfigure Request TakeOffOk");
-		bTakeOff=false;
-		flying = true;
-	}
 
-	if (flying)
+	stateManagement(land_pub,takeOff_pub);
+
+	ROS_INFO("CurrentStage %d",currentStage);
+	switch(currentStage)								//Change stages into variable names
 	{
-			 
-			if(camSelected==1) //Si la camara esta viendo abajo
+		case 0:	 		//Take off
+			ROS_INFO("Stage 0");
+			setCamera(botCamera,currentCamera,clientToggleCam);
+			
+			if (currentState==stateFlying)
+				currentStage=1;
+			break;
+		case 1:		// stabilizing at origin
+			ROS_INFO("Stage 1");
+			X_ref[x] = 0; X_ref[y] = 0; X_ref[z]= 1;
+			X_ref[yaw] = 3.1416/2; X_ref[roll]=0; X_ref[pitch]=0;
+			
+			X=X_marker[0];
+			
+			X[x]=X_ref[x];	X[y]=X_ref[y]; // No control in x or y
+			error = controlLaw(X_ref,X,vel);
+			
+			if (fabs(error[z])<0.1 && fabs(error[yaw])<0.1)
 			{
-				//usleep(2000000);
-				ez=1-z;
-				veloc.linear.z=ez;
-				eyaw=(3.1416/2)-yaw;
-				veloc.angular.z=eyaw;
-				ex=0-x;
-				ey=0-y;
-				veloc.linear.x=ey;
-				veloc.linear.y=ex;
+				currentStage=2;
+				setCamera(frontCamera,currentCamera,clientToggleCam);
+				sleep(0.5);
 			}
-			else{
-				
-				if(detected_flag==1){ //Detected flag se activa en el suscriber del ar pose cuando no se detecta marker, es decir aquí entra cuando no detecta el marker frontal y tiene que girar
-					ex=10;//Igualo a 10 para que no entre en el control done de más adelante
-					ey=10;
-					ez=10;
-					eyaw=10;
-					veloc.linear.z=0;
-					veloc.linear.x=0;
-					veloc.linear.y=0;
-					veloc.angular.z=.1;// Gira
-					
-				}
-				else{ //Detecta marker
-				
-					ez=1-z;
-					if(ez<-0.2) //Regula la velocidad en el avance hacia marker, ya que al estar a 2 metros de la referencia cabecea si se ocupa la velocidad con el valor del error, provocando que pierda el marker
-						ez=-.2;
-				
-					ex=0-x;
-					ey=0-y;
-					eyaw=0;
-				
-					if(fabs(ex)>0.05&&flagmarker2==0) //Aún cuando detecte el marker, tiene que alinearse frontalmente
-					{
-						ROS_INFO("ex-%f",ex);
-						veloc.angular.z=.1;//Sigue girando
-						veloc.linear.z=0;
-						veloc.linear.x=0;
-						veloc.linear.y=0;
-						
-					}
-					if(fabs(ex)<0.05){//Se alinea al marker y avanza
-						
-						flagmarker2=1;
-						ROS_INFO("ex-%f",ex);
-						veloc.linear.z=0;
-						veloc.linear.x=-ez;
-						veloc.linear.y=ex;
-						veloc.angular.z=0;
-						if(fabs(ez)<0.05){
-							
-							veloc.linear.z=ey;
-							veloc.linear.x=-ez;
-							veloc.linear.y=ex;
-						}
-					}
-				
-				}
-			}
+			break;
+			
 
-			vel.publish(veloc);
+		case 2: 	//Turning to search the marker
+			if (bTransitionStage2)
+			{
+				ROS_INFO("Stage 2");
+				setCamera(frontCamera,currentCamera,clientToggleCam);
 			
-		
-			if(fabs(ez)<.05&&fabs(ex)<.05&&fabs(ey)<.05&&fabs(eyaw)<.05){//Entra en caso que los errores sean minimos
-			
-				ROS_INFO("Control Done");
-				if(timeflag==0){//Primera vez que entra
-					ros::Time begin = ros::Time::now();//inicializa el crono
-					beginsecs=begin.toSec();
-					timeflag=1;
+				X=X_marker[0];
+				X_ref=X; // not control
+				X_ref[yaw]+=0.5;
+				controlLaw(X_ref,X,vel);
+				ROS_INFO("detected marker %d",detectedMarker);
+				if (detectedMarker==true && fabs(X[x])<0.05)
+				{
+					ROS_INFO("Goal 2");
+					currentStage=3;
 				}
-				ros::Time current = ros::Time::now();
-				currentsecs=current.toSec();
-				secs=currentsecs-beginsecs;//Diferencia de tiempo
-				ROS_INFO("%f",secs);
-				if(secs>5){
-					ROS_INFO("5 seconds");//Transcurren 5 segundos
-					if (camSelected==1){
-						clientToggleCam.call(togglecam);  
-						camSelected = 0; 
-						timeflag=0;
-						eyaw=10;
-						ex=10;
-						//usleep(500000);
-					}
-					else{
-						ROS_INFO("Reconfigure Request Land"); 
-						land_pub.publish(landing);
-						usleep(500000);
-						ROS_INFO("Reconfigure Request LandOk");
-						bLand=false;
-						clientToggleCam.call(togglecam);  
-						camSelected = 1; 
-						
-				  
-						flying = false;
-					}
-				}
-			
 			}
 			
-	
-	} 
-	  
+			break;
+		case 3:
+			ROS_INFO("Stage 3");
+			X[x]=-X_marker[0][z];
+			X[y]=X_marker[0][x];
+			
+			X[z]=X_marker[0][z];
+			X[yaw]=X_marker[0][yaw];
+			
+			
+			X_ref[x]=-1;
+			X_ref[y]=0;
+			X_ref[z]= X[z];		//no Control
+			X_ref[yaw]=X[yaw]; 	//no Control
+
+			
+			error = controlLaw(X_ref,X,vel);
+			
+			if (fabs(error[x])<0.1)
+			{
+				currentStage=4;
+			}
+			break;
+		case 4:
+			X_ref=X; // not control
+			controlLaw(X_ref,X,vel);
+			land_pub.publish(empty_msg);
+			break;
+
+
+	}
+
+
+
 	ros::spinOnce();
-	//usleep(500000);
 	loop_rate.sleep();
    
 }  
 return 0;
 
+}
+
+
+void stateManagement(ros::Publisher landPublisher,ros::Publisher takeOffPublisher) // Use current state by reference
+{
+	std_msgs::Empty empty_msg;
+	
+	if(bLand==true)
+	{
+		if (currentState!=stateLanding && currentState!=stateLand)
+		{
+			ROS_INFO("Request Landing...");
+			landPublisher.publish(empty_msg);		
+		}
+		else if(currentState==stateLand)
+		{
+			ROS_INFO("Request Landing...OK");
+			bLand=false;
+		}
+	}
+	else if(bTakeOff==true)
+	{
+		if (currentState!=stateTakingOff && currentState!=stateFlying)
+		{
+			ROS_INFO("Request Take off...");
+			takeOffPublisher.publish(empty_msg); 
+		}
+		else if(currentState==stateFlying)
+		{
+			ROS_INFO("Request Take off...OK");
+			bTakeOff=false;
+		}
+	}
+}
+
+std::vector<double> controlLaw(std::vector<double> X_ref,std::vector<double> X, ros::Publisher VelocityPublisher)
+{
+	//Error calculation
+	std::vector<double> e(6,0); // error
+	std::vector<double> u(6,0); // Control action
+	std::vector<double> Kp(6,1); // Control action
+	for (int i=0; i<6; i++)
+		e[i] = X_ref[i]-X[i];
+	
+	//Control signal
+
+	for (int i=0; i<6; i++)
+		u[i] = Kp[i]*e[i]; 	//Control law
+
+	// Apply the control signals
+	geometry_msgs::Twist veloc;
+	veloc.linear.x=u[x];
+	veloc.linear.y=u[y];
+	veloc.linear.z=u[z];
+/*	veloc.angular.x=u[roll]
+	veloc.angular.y=u[pitch]*/
+	veloc.angular.z=u[yaw];
+	
+	ROS_INFO("X_ref [%f,%f,%f,%f,%f,%f]",X_ref[0],X_ref[1],X_ref[2],X_ref[3],X_ref[4],X_ref[5]);
+	ROS_INFO("X [%f,%f,%f,%f,%f,%f]",X[0],X[1],X[2],X[3],X[4],X[5]);
+	ROS_INFO("Error [%f,%f,%f,%f,%f,%f]",e[0],e[1],e[2],e[3],e[4],e[5]);
+	
+	
+	VelocityPublisher.publish(veloc);
+	
+	return e;
+}
+
+
+	
+void setCamera(bool refCamera, bool &currentCamera,ros::ServiceClient clientToggleCam)
+{
+std_srvs::Empty empty_srv;
+
+if (refCamera!=currentCamera)
+	{
+		currentCamera=refCamera;
+		clientToggleCam.call(empty_srv); 
+	}
 }
