@@ -1,1 +1,17 @@
-Proj_ITR Package
+Introduction to ROS
+Mini Project
+
+During the course you have seen several ROS tools as well as learned how to create nodes, add publishers and subscribers, use actions, 
+work with launch files, etc. Now you have to develop a project by your own using all this acknowledge.
+
+Project main goal:
+
+The ardrone should navigate completely autonomously, only manually activating the take-off and land instructions using the dynamic
+reconfigure. 
+Initially the ardrone will be landed on an augmented reality marker (marker 1), then, when take-off is activated, it should start
+flying. While hovering, it should be aligned with the first marker detecting it with the bottom camera, once the alignment is done it
+waits 5 seconds until the next step. Switching the camera (ROS service toggle camera) should allow you to detected marker 2. The 
+quadrotor should fly towards the marker 2 and stop facing this at 1m. When the ardrone is hovering in front of the second marker, it
+has to wait 5 seconds and then it has to land. 
+
+If you feel confident with your proposed solution and the code, you can extend the project goal as much as you want.
